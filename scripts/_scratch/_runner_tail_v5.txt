@@ -1,0 +1,139 @@
+function _EmitCanonJson($node,[System.Text.StringBuilder]$sb){
+  $t=$node.t
+  if($t -eq 'null'){ [void]$sb.Append('null'); return }
+  if($t -eq 'bool'){ if($node.v){ [void]$sb.Append('true') } else { [void]$sb.Append('false') }; return }
+  if($t -eq 'string'){ [void]$sb.Append('"' + (_EscJsonString [string]$node.v) + '"'); return }
+  if($t -eq 'int'){ [void]$sb.Append([string]$node.v); return }
+  if($t -eq 'array'){
+    [void]$sb.Append('[')
+    $a=@(@($node.v))
+    for($i=0;$i -lt $a.Count;$i++){ if($i -gt 0){ [void]$sb.Append(',') }; _EmitCanonJson $a[$i] $sb }
+    [void]$sb.Append(']')
+    return
+  }
+  if($t -eq 'object'){
+    [void]$sb.Append('{')
+    $keys=New-Object System.Collections.Generic.List[string]
+    foreach($k in $node.v.Keys){ [void]$keys.Add([string]$k) }
+    $keys.Sort([System.StringComparer]::Ordinal)
+    for($i=0;$i -lt $keys.Count;$i++){
+      if($i -gt 0){ [void]$sb.Append(',') }
+      $k=$keys[$i]
+      [void]$sb.Append('"' + (_EscJsonString $k) + '":')
+      _EmitCanonJson $node.v[$k] $sb
+    }
+    [void]$sb.Append('}')
+    return
+  }
+  Die ('CSL_E_INTERNAL_UNKNOWN_NODE_TYPE: ' + $t)
+}
+
+function CanonJsonText([byte[]]$bytes){
+  $node = Parse-StrictJson $bytes
+  $sb = New-Object System.Text.StringBuilder
+  _EmitCanonJson $node $sb
+  $sb.ToString()
+}
+
+function RemoveObjectHashAndCanonBytes([byte[]]$bytes){
+  $node = Parse-StrictJson $bytes
+  if($node.t -ne 'object'){ Die 'CSL_E_HASHLAW_ROOT_NOT_OBJECT' }
+  if($node.v.ContainsKey('object_hash')){ [void]$node.v.Remove('object_hash') }
+  $sb = New-Object System.Text.StringBuilder
+  _EmitCanonJson $node $sb
+  $txt = $sb.ToString()
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  $enc.GetBytes($txt)
+}
+
+$CJ = Join-Path $RepoRoot 'testdata\canonjson\v1'
+$HL = Join-Path $RepoRoot 'testdata\hashlaw\v1'
+
+if($Mode -eq 'All' -or $Mode -eq 'WriteVectors'){
+  EnsureDir $CJ; EnsureDir $HL
+
+  function WriteCanonVector([string]$id,[string]$input,[string]$expectedCanon,[string]$notes){
+    $d=Join-Path $CJ $id; EnsureDir $d
+    Write-Utf8NoBomLf (Join-Path $d 'input.json') $input
+    Write-Utf8NoBomLf (Join-Path $d 'expected.canon.json') $expectedCanon
+    $enc=New-Object System.Text.UTF8Encoding($false)
+    $h='sha256:' + (Sha256Hex ($enc.GetBytes($expectedCanon)))
+    Write-Utf8NoBomLf (Join-Path $d 'expected.sha256.txt') ($h + "`n")
+    Write-Utf8NoBomLf (Join-Path $d 'notes.md') $notes
+  }
+
+  function WriteRejectVector([string]$id,[string]$input,[string]$expectedErr,[string]$notes){
+    $d=Join-Path $CJ $id; EnsureDir $d
+    Write-Utf8NoBomLf (Join-Path $d 'input.json') $input
+    Write-Utf8NoBomLf (Join-Path $d 'expected.error.txt') ($expectedErr + "`n")
+    Write-Utf8NoBomLf (Join-Path $d 'notes.md') $notes
+  }
+
+  function WriteHashLawVector([string]$id,[string]$objJson,[string]$notes){
+    $d=Join-Path $HL $id; EnsureDir $d
+    Write-Utf8NoBomLf (Join-Path $d 'object.without_object_hash.json') $objJson
+    $bytes = Read-Bytes (Join-Path $d 'object.without_object_hash.json')
+    $canonBytes = RemoveObjectHashAndCanonBytes $bytes
+    $h = 'sha256:' + (Sha256Hex $canonBytes)
+    Write-Utf8NoBomLf (Join-Path $d 'expected.object_hash.txt') ($h + "`n")
+    Write-Utf8NoBomLf (Join-Path $d 'notes.md') $notes
+  }
+
+  WriteCanonVector '0001_min_object' '{"b":1,"a":2}' '{"a":2,"b":1}' "# 0001_min_object`nKey ordering, integer values.`n"
+  WriteCanonVector '0002_string_escapes' '{"s":"a\"b\\c\n"}' '{"s":"a\"b\\c\u000a"}' "# 0002_string_escapes`nEscapes + newline canonicalized to \\u000a.`n"
+  WriteCanonVector '0003_array_order' '{"a":[3,2,1]}' '{"a":[3,2,1]}' "# 0003_array_order`nArray order preserved.`n"
+
+  WriteRejectVector '9001_reject_dup_keys' '{"a":1,"a":2}' 'CSL_E_DUPKEY: a' "# 9001_reject_dup_keys`nDuplicate keys MUST fail.`n"
+  WriteRejectVector '9002_reject_float' '{"a":1.2}' 'CSL_E_FLOAT_FORBIDDEN: 1.2' "# 9002_reject_float`nFloats forbidden.`n"
+
+  WriteHashLawVector '0101_manifest_object_hash' '{"schema":"packet.manifest.v1","kind":"packet.constitution.v1","created_time":"2026-02-16T00:00:00Z","producer":"single-tenant/demo/authority/csl","producer_instance":"demo-offline-1","files":[]}' "# 0101_manifest_object_hash`nHash of canonical bytes of object (no object_hash).`n"
+  WriteHashLawVector '0102_receipt_object_hash' '{"schema":"csl.receipt.v1","ts_utc":"2026-02-16T00:00:00Z","type":"conformance.ok.v1","note":"demo"}' "# 0102_receipt_object_hash`nReceipt hash example.`n"
+
+  Write-Host ('WROTE: ' + $CJ) -ForegroundColor Green
+  Write-Host ('WROTE: ' + $HL) -ForegroundColor Green
+}
+
+if($Mode -eq 'All' -or $Mode -eq 'ConformanceOnly'){
+  $cjDirs = Get-ChildItem -LiteralPath $CJ -Directory | Sort-Object Name
+  $pass = 0
+
+  foreach($d in $cjDirs){
+    $in = Join-Path $d.FullName 'input.json'
+    $expCanon = Join-Path $d.FullName 'expected.canon.json'
+    $expErr = Join-Path $d.FullName 'expected.error.txt'
+    try{
+      $canon = CanonJsonText (Read-Bytes $in)
+      if(Test-Path -LiteralPath $expErr -PathType Leaf){ Die ('EXPECTED_ERROR_BUT_GOT_OK: ' + $d.Name) }
+      $expected = Read-Utf8 $expCanon
+      if($canon -ne $expected){ Die ('CANON_MISMATCH: ' + $d.Name) }
+
+      $enc = New-Object System.Text.UTF8Encoding($false)
+      $h = 'sha256:' + (Sha256Hex ($enc.GetBytes($canon)))
+      $expHash = (Read-Utf8 (Join-Path $d.FullName 'expected.sha256.txt')).Trim()
+      if($h -ne $expHash){ Die ('HASH_MISMATCH: ' + $d.Name) }
+
+      $pass++
+    } catch {
+      if(Test-Path -LiteralPath $expErr -PathType Leaf){
+        $want = (Read-Utf8 $expErr).Trim()
+        $got  = [string]$_.Exception.Message
+        if($got -ne $want){ throw ('REJECT_MISMATCH: ' + $d.Name + ' want=' + $want + ' got=' + $got) }
+        $pass++
+      } else { throw }
+    }
+  }
+
+  Write-Host ('OK: CANONJSON_V1 vectors=' + $pass) -ForegroundColor Green
+
+  $hlDirs = Get-ChildItem -LiteralPath $HL -Directory | Sort-Object Name
+  foreach($d in $hlDirs){
+    $obj = Join-Path $d.FullName 'object.without_object_hash.json'
+    $expected = (Read-Utf8 (Join-Path $d.FullName 'expected.object_hash.txt')).Trim()
+    $canonBytes = RemoveObjectHashAndCanonBytes (Read-Bytes $obj)
+    $got = 'sha256:' + (Sha256Hex $canonBytes)
+    if($got -ne $expected){ Die ('HASHLAW_MISMATCH: ' + $d.Name + ' expected=' + $expected + ' got=' + $got) }
+  }
+
+  Write-Host ('OK: HASHLAW_V1 vectors=' + $hlDirs.Count) -ForegroundColor Green
+  Write-Host 'OK: CONFORMANCE_V1_ALL_GREEN' -ForegroundColor Green
+}

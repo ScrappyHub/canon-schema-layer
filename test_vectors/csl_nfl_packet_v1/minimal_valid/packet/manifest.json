@@ -1,0 +1,10 @@
+{
+  "schema":"csl.nfl.packet.manifest.v1",
+  "source_instrument":"csl",
+  "packet_type":"csl_nfl_packet_v1",
+  "source_root":"C:\\dev\\csl\\test_vectors\\csl_nfl_packet_v1\\minimal_valid\\input",
+  "payload_files":[
+    "payload/canonjson_v1/minimal_object.json",
+    "payload/hashlaw_v1/minimal_hashlaw_object.json"
+  ]
+}
