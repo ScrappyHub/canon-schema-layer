@@ -1,0 +1,36 @@
+param([Parameter(Mandatory=$true)][string]$RepoRoot)
+$ErrorActionPreference="Stop"
+Set-StrictMode -Version Latest
+function Die([string]$m){ throw $m }
+function EnsureDir([string]$p){ if([string]::IsNullOrWhiteSpace($p)){ Die "EnsureDir: empty path" }; if(-not (Test-Path -LiteralPath $p -PathType Container)){ New-Item -ItemType Directory -Force -Path $p | Out-Null } }
+function Write-Utf8NoBomLf([string]$Path,[string]$Text){ $dir = Split-Path -Parent $Path; if($dir){ EnsureDir $dir }; $t = $Text.Replace("`r`n","`n").Replace("`r","`n"); if(-not $t.EndsWith("`n")){ $t += "`n" }; $enc = New-Object System.Text.UTF8Encoding($false); [System.IO.File]::WriteAllBytes($Path,$enc.GetBytes($t)) }
+function Parse-GateFile([string]$Path){ $t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($Path,[ref]$t,[ref]$e); if($e -and $e.Count -gt 0){ $x=$e[0]; Die ("PARSE_GATE_FAIL: {0}:{1}:{2}: {3}" -f $Path,$x.Extent.StartLineNumber,$x.Extent.StartColumnNumber,$x.Message) } }
+
+$Runner = Join-Path $RepoRoot 'scripts\_RUN_csl_add_vectors_and_conformance_v1.ps1'
+if(-not (Test-Path -LiteralPath $Runner -PathType Leaf)){ Die ("MISSING_RUNNER: " + $Runner) }
+$raw = [System.IO.File]::ReadAllText($Runner,[System.Text.UTF8Encoding]::new($false))
+$raw = $raw.Replace("`r`n","`n").Replace("`r","`n")
+
+# StrictMode-safe fix:
+# Any occurrence of "$1".."$9" causes PowerShell to expand $1 var (undefined) BEFORE regex replacement.
+# Replace them with single-quoted '$1'..'$9' so .NET regex gets the group tokens without PS interpolation.
+$before = $raw
+for($n=1;$n -le 9;$n++){
+  $dq = '"$' + $n + '"'
+  $sq = '''$' + $n + ''''
+  $raw = $raw.Replace($dq,$sq)
+}
+
+if($raw -eq $before){
+  # Still ok; we just want to guarantee no "$1" style hazards remain.
+  Write-Host "NOTE: no double-quoted $group tokens found (no-op) — continuing" -ForegroundColor Yellow
+} else {
+  Write-Host "PATCH_APPLIED: replaced double-quoted $group tokens ($1..$9) with single-quoted literals" -ForegroundColor Green
+}
+
+# sanity: fail if any "$1" style tokens remain
+if($raw -match '"\$[1-9]"'){ Die 'PATCH_INCOMPLETE: still contains a "\$N" token' }
+
+Write-Utf8NoBomLf $Runner $raw
+Parse-GateFile $Runner
+Write-Host ("PATCH_OK+RUNNER_PARSE_OK: " + $Runner) -ForegroundColor Green

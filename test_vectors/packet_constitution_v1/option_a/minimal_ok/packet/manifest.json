@@ -1,0 +1,1 @@
+{"schema":"packet.manifest.v1","kind":"packet.constitution.v1","created_time":"2026-02-16T00:00:00Z","producer":"single-tenant/demo/authority/csl","producer_instance":"demo-offline-1","files":[{"path":"payload/hello.txt","bytes":6,"sha256":"sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"}]}

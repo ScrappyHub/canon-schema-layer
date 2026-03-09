@@ -1,0 +1,8 @@
+CSL_NFL_PACKET_FREEZE_OK
+LATEST_BUNDLE=C:\dev\csl\proofs\receipts\20260308T231314Z
+FROZEN_BUNDLE=C:\dev\csl\test_vectors\tier0_frozen\csl_nfl_packet_green_20260308
+LOCK_NOTE=C:\dev\csl\docs\CSL_NFL_PACKET_LOCK.md
+STATUS_NOTE=C:\dev\csl\docs\CSL_CANONICAL_STATUS.md
+PACKET_ROOT=C:\dev\csl\test_vectors\csl_nfl_packet_v1\minimal_valid\packet
+MANIFEST_SHA256=1ef837c359d7f6b6558c01918f9cbdd31c4aa59ad9379ef8a472da8d486a0585
+SHA256SUMS_SHA256=b4cef74ea3ea6e727aa0e01ab3edfefff4a3ea6807d62e0f36f915740b79480a

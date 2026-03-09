@@ -1,0 +1,303 @@
+param(
+  [Parameter(Mandatory=$true)][string]$RepoRoot,
+  [ValidateSet('All','WriteVectors','ConformanceOnly')][string]$Mode='All'
+)
+
+$ErrorActionPreference="Stop"
+Set-StrictMode -Version Latest
+
+function Die([string]$m){ throw $m }
+function EnsureDir([string]$p){
+  if(-not (Test-Path -LiteralPath $p -PathType Container)){
+    New-Item -ItemType Directory -Force -Path $p | Out-Null
+  }
+}
+function Write-Utf8NoBomLf([string]$Path,[string]$Text){
+  $dir = Split-Path -Parent $Path
+  if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  $t = $Text.Replace("`r`n","`n").Replace("`r","`n")
+  if (-not $t.EndsWith("`n")) { $t += "`n" }
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllBytes($Path, $enc.GetBytes($t))
+}
+function Read-Utf8([string]$p){ [System.IO.File]::ReadAllText($p,[System.Text.UTF8Encoding]::new($false)) }
+function Read-Bytes([string]$p){ [System.IO.File]::ReadAllBytes($p) }
+
+function Sha256Hex([byte[]]$Bytes){
+  if($null -eq $Bytes){ $Bytes=@() }
+  $sha=[System.Security.Cryptography.SHA256]::Create()
+  try { $h=$sha.ComputeHash([byte[]]$Bytes) } finally { $sha.Dispose() }
+  $sb=New-Object System.Text.StringBuilder
+  for($i=0;${1}.Value -lt $h.Length;$i++){ [void]$sb.Append($h[$i].ToString('x2')) }
+  $sb.ToString()
+}
+
+function _Utf8ToString([byte[]]$b){
+  if($null -eq $b){ $b=@() }
+  $enc = New-Object System.Text.UTF8Encoding($false,$true)
+  $enc.GetString($b)
+}
+function _IsWs([char]$c){ return ($c -eq [char]9 -or $c -eq [char]10 -or $c -eq [char]13 -or $c -eq [char]32) }
+function _SkipWs([string]$s,[ref]$i){ while($i.Value -lt $s.Length -and (_IsWs $s[$i.Value])){ $i.Value++ } }
+function _ParseHex4([string]$s,[ref]$i){
+  if(($i.Value + 4) -gt $s.Length){ Die 'CSL_E_BAD_ESCAPE_U' }
+  $hex = $s.Substring($i.Value,4)
+  if(-not ($hex -match '^[0-9A-Fa-f]{4}$')){ Die 'CSL_E_BAD_ESCAPE_U' }
+  $i.Value += 4
+  return [int]::Parse($hex,[System.Globalization.NumberStyles]::HexNumber)
+}
+function _ParseString([string]$s,[ref]$i){
+  if($s[$i.Value] -ne '"'){ Die 'CSL_E_STRING_EXPECTED' }
+  $i.Value++
+  $sb = New-Object System.Text.StringBuilder
+  while($true){
+    if($i.Value -ge $s.Length){ Die 'CSL_E_UNTERMINATED_STRING' }
+    $ch = $s[$i.Value]
+    if($ch -eq '"'){ $i.Value++; break }
+    if([int][char]$ch -lt 32){ Die 'CSL_E_STRING_CTRL' }
+    if([int][char]$ch -ne 92){ [void]$sb.Append($ch); $i.Value++; continue }
+    $i.Value++
+    if($i.Value -ge $s.Length){ Die 'CSL_E_BAD_ESCAPE' }
+    $e = $s[$i.Value]
+    switch($e){
+      '"'  { [void]$sb.Append('"');  $i.Value++; break }
+      '\'  { [void]$sb.Append('\' );  $i.Value++; break }
+      '/'  { [void]$sb.Append('/');  $i.Value++; break }
+      'b'  { [void]$sb.Append([char]8);  $i.Value++; break }
+      'f'  { [void]$sb.Append([char]12); $i.Value++; break }
+      'n'  { [void]$sb.Append([char]10); $i.Value++; break }
+      'r'  { [void]$sb.Append([char]13); $i.Value++; break }
+      't'  { [void]$sb.Append([char]9);  $i.Value++; break }
+      'u'  { $i.Value++; $cp = _ParseHex4 $s ([ref]$i); [void]$sb.Append([char]$cp); break }
+      default { Die 'CSL_E_BAD_ESCAPE' }
+    }
+  }
+  return $sb.ToString()
+}
+function _ParseNumberToken([string]$s,[ref]$i){
+  $start = $i.Value
+  if($s[$i.Value] -eq '-'){ $i.Value++ }
+  if($i.Value -ge $s.Length){ Die 'CSL_E_BAD_NUMBER' }
+  if($s[$i.Value] -eq '0'){ $i.Value++ } else {
+    if(-not ($s[$i.Value] -match '[1-9]')){ Die 'CSL_E_BAD_NUMBER' }
+    while($i.Value -lt $s.Length -and ($s[$i.Value] -match '[0-9]')){ $i.Value++ }
+  }
+  if($i.Value -lt $s.Length){ $c = $s[$i.Value]; if($c -eq '.' -or $c -eq 'e' -or $c -eq 'E'){ Die ('CSL_E_FLOAT_FORBIDDEN: ' + $s.Substring($start,[Math]::Min(16,$s.Length-$start))) } }
+  $raw = $s.Substring($start, $i.Value - $start)
+  if(-not ($raw -match '^-?(0|[1-9][0-9]*)$')){ Die ('CSL_E_BAD_NUMBER: ' + $raw) }
+  $n = [Int64]$raw
+  if([math]::Abs([double]$n) -gt 9007199254740991){ Die ('CSL_E_INT_RANGE: ' + $raw) }
+  return $raw
+}
+function _ParseValue([string]$s,[ref]$i){
+  _SkipWs $s ([ref]$i)
+  if($i.Value -ge $s.Length){ Die 'CSL_E_UNEXPECTED_EOF' }
+  $ch = $s[$i.Value]
+  if($ch -eq '"'){ $str=_ParseString $s ([ref]$i); return [pscustomobject]@{ t='string'; v=$str } }
+  if($ch -eq '{'){
+    $i.Value++
+    $map = New-Object System.Collections.Generic.Dictionary[string,object]([System.StringComparer]::Ordinal)
+    $seen = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
+    _SkipWs $s ([ref]$i)
+    if($i.Value -lt $s.Length -and $s[$i.Value] -eq '}'){ $i.Value++; return [pscustomobject]@{ t='object'; v=$map } }
+    while($true){
+      _SkipWs $s ([ref]$i)
+      if($i.Value -ge $s.Length -or $s[$i.Value] -ne '"'){ Die 'CSL_E_PROP_EXPECTED' }
+      $k = _ParseString $s ([ref]$i)
+      if(-not $seen.Add($k)){ Die ('CSL_E_DUPKEY: ' + $k) }
+      _SkipWs $s ([ref]$i)
+      if($i.Value -ge $s.Length -or $s[$i.Value] -ne ':' ){ Die 'CSL_E_COLON_EXPECTED' }
+      $i.Value++
+      $val = _ParseValue $s ([ref]$i)
+      $map[$k] = $val
+      _SkipWs $s ([ref]$i)
+      if($i.Value -ge $s.Length){ Die 'CSL_E_UNTERMINATED_OBJECT' }
+      if($s[$i.Value] -eq '}'){ $i.Value++; break }
+      if($s[$i.Value] -ne ','){ Die 'CSL_E_COMMA_EXPECTED' }
+      $i.Value++
+    }
+    return [pscustomobject]@{ t='object'; v=$map }
+  }
+  if($ch -eq '['){
+    $i.Value++
+    $list = New-Object System.Collections.Generic.List[object]
+    _SkipWs $s ([ref]$i)
+    if($i.Value -lt $s.Length -and $s[$i.Value] -eq ']'){ $i.Value++; return [pscustomobject]@{ t='array'; v=$list.ToArray() } }
+    while($true){
+      $val = _ParseValue $s ([ref]$i)
+      [void]$list.Add($val)
+      _SkipWs $s ([ref]$i)
+      if($i.Value -ge $s.Length){ Die 'CSL_E_UNTERMINATED_ARRAY' }
+      if($s[$i.Value] -eq ']'){ $i.Value++; break }
+      if($s[$i.Value] -ne ','){ Die 'CSL_E_COMMA_EXPECTED' }
+      $i.Value++
+    }
+    return [pscustomobject]@{ t='array'; v=$list.ToArray() }
+  }
+  if($ch -eq 't' -and ($i.Value+4) -le $s.Length -and $s.Substring($i.Value,4) -eq 'true'){ $i.Value+=4; return [pscustomobject]@{ t='bool'; v=$true } }
+  if($ch -eq 'f' -and ($i.Value+5) -le $s.Length -and $s.Substring($i.Value,5) -eq 'false'){ $i.Value+=5; return [pscustomobject]@{ t='bool'; v=$false } }
+  if($ch -eq 'n' -and ($i.Value+4) -le $s.Length -and $s.Substring($i.Value,4) -eq 'null'){ $i.Value+=4; return [pscustomobject]@{ t='null'; v=$null } }
+  if($ch -eq '-' -or ($ch -match '[0-9]')){ $raw=_ParseNumberToken $s ([ref]$i); return [pscustomobject]@{ t='int'; v=$raw } }
+  Die ('CSL_E_TOKEN_UNSUPPORTED: ' + $ch)
+}
+function Parse-StrictJson([byte[]]$bytes){
+  $s = _Utf8ToString $bytes
+  $i = [ref]0
+  $node = _ParseValue $s ([ref]$i)
+  _SkipWs $s ([ref]$i)
+  if($i.Value -ne $s.Length){ Die 'CSL_E_TRAILING_GARBAGE' }
+  return $node
+}
+function _EscJsonString([string]$s){
+  if($null -eq $s){ return '' }
+  $sb=New-Object System.Text.StringBuilder
+  for($i=0;${1}.Value -lt $s.Length;$i++){
+    $ch=$s[$i]
+    $code=[int][char]$ch
+    if($code -lt 32){ [void]$sb.Append('\u' + $code.ToString('x4')) }
+    elseif($code -eq 34){ [void]$sb.Append('\"') }
+    elseif($code -eq 92){ [void]$sb.Append('\\') }
+    else { [void]$sb.Append($ch) }
+  }
+  $sb.ToString()
+}
+function _EmitCanonJson($node,[System.Text.StringBuilder]$sb){
+  $t=$node.t
+  if($t -eq 'null'){ [void]$sb.Append('null'); return }
+  if($t -eq 'bool'){ if($node.v){ [void]$sb.Append('true') } else { [void]$sb.Append('false') }; return }
+  if($t -eq 'string'){ [void]$sb.Append('"' + (_EscJsonString [string]$node.v) + '"'); return }
+  if($t -eq 'int'){ [void]$sb.Append([string]$node.v); return }
+  if($t -eq 'array'){
+    [void]$sb.Append('[')
+    $a=@(@($node.v))
+    for($i=0;${1}.Value -lt $a.Count;$i++){ if(${1}.Value -gt 0){ [void]$sb.Append(',') }; _EmitCanonJson $a[$i] $sb }
+    [void]$sb.Append(']')
+    return
+  }
+  if($t -eq 'object'){
+    [void]$sb.Append('{')
+    $keys=New-Object System.Collections.Generic.List[string]
+    foreach($k in $node.v.Keys){ [void]$keys.Add([string]$k) }
+    $keys.Sort([System.StringComparer]::Ordinal)
+    for($i=0;${1}.Value -lt $keys.Count;$i++){
+      if(${1}.Value -gt 0){ [void]$sb.Append(',') }
+      $k=$keys[$i]
+      [void]$sb.Append('"' + (_EscJsonString $k) + '":')
+      _EmitCanonJson $node.v[$k] $sb
+    }
+    [void]$sb.Append('}')
+    return
+  }
+  Die ('CSL_E_INTERNAL_UNKNOWN_NODE_TYPE: ' + $t)
+}
+
+function CanonJsonText([byte[]]$bytes){
+  $node = Parse-StrictJson $bytes
+  $sb = New-Object System.Text.StringBuilder
+  _EmitCanonJson $node $sb
+  $sb.ToString()
+}
+
+function RemoveObjectHashAndCanonBytes([byte[]]$bytes){
+  $node = Parse-StrictJson $bytes
+  if($node.t -ne 'object'){ Die 'CSL_E_HASHLAW_ROOT_NOT_OBJECT' }
+  if($node.v.ContainsKey('object_hash')){ [void]$node.v.Remove('object_hash') }
+  $sb = New-Object System.Text.StringBuilder
+  _EmitCanonJson $node $sb
+  $txt = $sb.ToString()
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  $enc.GetBytes($txt)
+}
+
+$CJ = Join-Path $RepoRoot 'testdata\canonjson\v1'
+$HL = Join-Path $RepoRoot 'testdata\hashlaw\v1'
+
+if($Mode -eq 'All' -or $Mode -eq 'WriteVectors'){
+  EnsureDir $CJ; EnsureDir $HL
+
+  function WriteCanonVector([string]$id,[string]$input,[string]$expectedCanon,[string]$notes){
+    $d=Join-Path $CJ $id; EnsureDir $d
+    Write-Utf8NoBomLf (Join-Path $d 'input.json') $input
+    Write-Utf8NoBomLf (Join-Path $d 'expected.canon.json') $expectedCanon
+    $enc=New-Object System.Text.UTF8Encoding($false)
+    $h='sha256:' + (Sha256Hex ($enc.GetBytes($expectedCanon)))
+    Write-Utf8NoBomLf (Join-Path $d 'expected.sha256.txt') ($h + "`n")
+    Write-Utf8NoBomLf (Join-Path $d 'notes.md') $notes
+  }
+
+  function WriteRejectVector([string]$id,[string]$input,[string]$expectedErr,[string]$notes){
+    $d=Join-Path $CJ $id; EnsureDir $d
+    Write-Utf8NoBomLf (Join-Path $d 'input.json') $input
+    Write-Utf8NoBomLf (Join-Path $d 'expected.error.txt') ($expectedErr + "`n")
+    Write-Utf8NoBomLf (Join-Path $d 'notes.md') $notes
+  }
+
+  function WriteHashLawVector([string]$id,[string]$objJson,[string]$notes){
+    $d=Join-Path $HL $id; EnsureDir $d
+    Write-Utf8NoBomLf (Join-Path $d 'object.without_object_hash.json') $objJson
+    $bytes = Read-Bytes (Join-Path $d 'object.without_object_hash.json')
+    $canonBytes = RemoveObjectHashAndCanonBytes $bytes
+    $h = 'sha256:' + (Sha256Hex $canonBytes)
+    Write-Utf8NoBomLf (Join-Path $d 'expected.object_hash.txt') ($h + "`n")
+    Write-Utf8NoBomLf (Join-Path $d 'notes.md') $notes
+  }
+
+  WriteCanonVector '0001_min_object' '{"b":1,"a":2}' '{"a":2,"b":1}' "# 0001_min_object`nKey ordering, integer values.`n"
+  WriteCanonVector '0002_string_escapes' '{"s":"a\"b\\c\n"}' '{"s":"a\"b\\c\u000a"}' "# 0002_string_escapes`nEscapes + newline canonicalized to \\u000a.`n"
+  WriteCanonVector '0003_array_order' '{"a":[3,2,1]}' '{"a":[3,2,1]}' "# 0003_array_order`nArray order preserved.`n"
+
+  WriteRejectVector '9001_reject_dup_keys' '{"a":1,"a":2}' 'CSL_E_DUPKEY: a' "# 9001_reject_dup_keys`nDuplicate keys MUST fail.`n"
+  WriteRejectVector '9002_reject_float' '{"a":1.2}' 'CSL_E_FLOAT_FORBIDDEN: 1.2' "# 9002_reject_float`nFloats forbidden.`n"
+
+  WriteHashLawVector '0101_manifest_object_hash' '{"schema":"packet.manifest.v1","kind":"packet.constitution.v1","created_time":"2026-02-16T00:00:00Z","producer":"single-tenant/demo/authority/csl","producer_instance":"demo-offline-1","files":[]}' "# 0101_manifest_object_hash`nHash of canonical bytes of object (no object_hash).`n"
+  WriteHashLawVector '0102_receipt_object_hash' '{"schema":"csl.receipt.v1","ts_utc":"2026-02-16T00:00:00Z","type":"conformance.ok.v1","note":"demo"}' "# 0102_receipt_object_hash`nReceipt hash example.`n"
+
+  Write-Host ('WROTE: ' + $CJ) -ForegroundColor Green
+  Write-Host ('WROTE: ' + $HL) -ForegroundColor Green
+}
+
+if($Mode -eq 'All' -or $Mode -eq 'ConformanceOnly'){
+  $cjDirs = Get-ChildItem -LiteralPath $CJ -Directory | Sort-Object Name
+  $pass = 0
+
+  foreach($d in $cjDirs){
+    $in = Join-Path $d.FullName 'input.json'
+    $expCanon = Join-Path $d.FullName 'expected.canon.json'
+    $expErr = Join-Path $d.FullName 'expected.error.txt'
+    try{
+      $canon = CanonJsonText (Read-Bytes $in)
+      if(Test-Path -LiteralPath $expErr -PathType Leaf){ Die ('EXPECTED_ERROR_BUT_GOT_OK: ' + $d.Name) }
+      $expected = Read-Utf8 $expCanon
+      if($canon -ne $expected){ Die ('CANON_MISMATCH: ' + $d.Name) }
+
+      $enc = New-Object System.Text.UTF8Encoding($false)
+      $h = 'sha256:' + (Sha256Hex ($enc.GetBytes($canon)))
+      $expHash = (Read-Utf8 (Join-Path $d.FullName 'expected.sha256.txt')).Trim()
+      if($h -ne $expHash){ Die ('HASH_MISMATCH: ' + $d.Name) }
+
+      $pass++
+    } catch {
+      if(Test-Path -LiteralPath $expErr -PathType Leaf){
+        $want = (Read-Utf8 $expErr).Trim()
+        $got  = [string]$_.Exception.Message
+        if($got -ne $want){ throw ('REJECT_MISMATCH: ' + $d.Name + ' want=' + $want + ' got=' + $got) }
+        $pass++
+      } else { throw }
+    }
+  }
+
+  Write-Host ('OK: CANONJSON_V1 vectors=' + $pass) -ForegroundColor Green
+
+  $hlDirs = Get-ChildItem -LiteralPath $HL -Directory | Sort-Object Name
+  foreach($d in $hlDirs){
+    $obj = Join-Path $d.FullName 'object.without_object_hash.json'
+    $expected = (Read-Utf8 (Join-Path $d.FullName 'expected.object_hash.txt')).Trim()
+    $canonBytes = RemoveObjectHashAndCanonBytes (Read-Bytes $obj)
+    $got = 'sha256:' + (Sha256Hex $canonBytes)
+    if($got -ne $expected){ Die ('HASHLAW_MISMATCH: ' + $d.Name + ' expected=' + $expected + ' got=' + $got) }
+  }
+
+  Write-Host ('OK: HASHLAW_V1 vectors=' + $hlDirs.Count) -ForegroundColor Green
+  Write-Host 'OK: CONFORMANCE_V1_ALL_GREEN' -ForegroundColor Green
+}
+

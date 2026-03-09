@@ -1,0 +1,1 @@
+{"schema":"csl.sig_envelope.v1","namespace":"packet/manifest","principal":"single-tenant/demo/authority/csl","key_id":"demo-ed25519","signed_object_kind":"manifest","signed_object_sha256":"sha256:
