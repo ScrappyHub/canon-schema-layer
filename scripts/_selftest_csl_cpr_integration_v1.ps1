@@ -33,10 +33,22 @@ try {
   Parse-GateFile (Join-Path $RepoRoot "scripts\csl_verify_packet_with_cpr_v1.ps1")
   Parse-GateFile (Join-Path $CprRepoRoot "cli\cpr.ps1")
 
-  $PacketPath = Join-Path $CprRepoRoot "test_vectors\packet_constitution_v1\minimal"
-  if (-not (Test-Path -LiteralPath $PacketPath -PathType Container)) {
+  $VectorPath = Join-Path $CprRepoRoot "test_vectors\packet_constitution_v1\minimal"
+  if (-not (Test-Path -LiteralPath $VectorPath -PathType Container)) {
     Fail "CPR_MINIMAL_VECTOR_MISSING"
   }
+
+  $RunRoot = Join-Path $RepoRoot "proofs\_csl_cpr_selftest_packet"
+  if (Test-Path -LiteralPath $RunRoot) {
+    Remove-Item -LiteralPath $RunRoot -Recurse -Force
+  }
+  New-Item -ItemType Directory -Path $RunRoot -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $RunRoot "payload") -Force | Out-Null
+
+  Copy-Item -LiteralPath (Join-Path $VectorPath "manifest.json") -Destination (Join-Path $RunRoot "manifest.json") -Force
+  Copy-Item -LiteralPath (Join-Path $VectorPath "packet_id.txt") -Destination (Join-Path $RunRoot "packet_id.txt") -Force
+  Copy-Item -LiteralPath (Join-Path $VectorPath "sha256sums.txt") -Destination (Join-Path $RunRoot "sha256sums.txt") -Force
+  Copy-Item -LiteralPath (Join-Path $VectorPath "payload\hello.txt") -Destination (Join-Path $RunRoot "payload\hello.txt") -Force
 
   $PSExe = (Get-Command powershell.exe).Source
   $Output = & $PSExe `
@@ -45,7 +57,7 @@ try {
     -ExecutionPolicy Bypass `
     -File (Join-Path $RepoRoot "scripts\csl_verify_packet_with_cpr_v1.ps1") `
     -RepoRoot $RepoRoot `
-    -PacketPath $PacketPath `
+    -PacketPath $RunRoot `
     -CprRepoRoot $CprRepoRoot 2>&1
 
   $ExitCode = $LASTEXITCODE
