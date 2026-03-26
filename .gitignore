@@ -1,0 +1,20 @@
+# === GENERATED / NON-CANONICAL ===
+proofs/_*
+proofs/receipts/*/
+proofs/receipts/*_green/
+proofs/receipts/*_full_green/
+proofs/receipts/*_freeze/
+proofs/receipts/*_selftest/
+proofs/receipts/20*/
+
+# allow canonical ledgers only
+!proofs/receipts/csl.ndjson
+!proofs/receipts/csl.cpr.ndjson
+
+# scratch + backups
+scripts/_scratch/
+*.bak*
+*.tmp
+
+# local test artifacts
+testdata/
