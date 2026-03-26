@@ -1,0 +1,2 @@
+{"packet_path":"C:/dev/cpr/test_vectors/packet_constitution_v1/minimal","result":"FAIL","code":"CPR_VERIFY_NONZERO","detail":"CPR_VERIFY_FAIL:SHA256SUMS_MISSING_COVERAGE","event_type":"verify","schema":"csl.cpr.receipt.v1"}
+{"packet_path":"C:/dev/cpr/test_vectors/packet_constitution_v1/minimal","result":"FAIL","code":"CPR_VERIFY_NONZERO","detail":"CPR_VERIFY_FAIL:SHA256SUMS_MISSING_COVERAGE","event_type":"verify","schema":"csl.cpr.receipt.v1"}
